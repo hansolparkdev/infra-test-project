@@ -1,0 +1,131 @@
+# 워크플로 이름:
+# GitHub Actions 화면에서 이 이름으로 표시된다.
+name: CI
+
+# 워크플로 실행 조건:
+# 1) main 브랜치로 향하는 Pull Request가 열리거나 업데이트될 때 실행
+# 2) main 브랜치에 직접 push가 일어날 때도 실행
+# 즉, PR 검증과 main 브랜치 보호용 기본 CI 역할을 함께 수행한다.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# 실제 자동화 작업 정의 영역:
+# 여기서는 프론트엔드와 백엔드를 각각 별도 job으로 분리해 병렬 실행 가능하게 구성한다.
+jobs:
+  frontend:
+    # GitHub Actions UI에 표시될 프론트엔드 job 이름
+    name: Frontend Lint & Build
+
+    # GitHub 호스팅 Ubuntu 러너에서 작업을 수행한다.
+    runs-on: ubuntu-latest
+
+    # 이 job 안의 run 명령은 기본적으로 frontend 폴더에서 실행되도록 설정한다.
+    # 매 step마다 cd frontend를 반복하지 않아도 되어 설정이 단순해진다.
+    defaults:
+      run:
+        working-directory: frontend
+
+    # 프론트엔드 CI 단계들
+    steps:
+      # 현재 저장소 코드를 러너에 체크아웃한다.
+      # 이 단계가 있어야 이후 npm install, lint, build가 실제 프로젝트 파일 기준으로 수행된다.
+      - uses: actions/checkout@v4
+
+      # Node.js 실행 환경을 설치한다.
+      # cache: npm 옵션으로 npm 캐시를 재사용해 설치 속도를 높이고,
+      # cache-dependency-path로 어떤 lockfile을 기준으로 캐시 키를 만들지 명시한다.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # lockfile(package-lock.json) 기준으로 정확한 의존성을 설치한다.
+      # CI에서는 npm install보다 npm ci가 더 재현 가능하고 안정적이다.
+      - name: Install
+        run: npm ci
+
+      # ESLint 검사를 수행한다.
+      # 코드 스타일, 잠재 버그, Next.js 권장 규칙 위반 등을 조기에 잡기 위한 단계다.
+      - name: Lint
+        run: npm run lint
+
+      # TypeScript 타입 검사를 수행한다.
+      # 실제 빌드 전에 타입 오류를 명확히 분리해 확인하기 위해 별도 단계로 둔다.
+      # --noEmit 옵션은 JS 출력 파일을 만들지 않고 타입 검사만 수행하게 한다.
+      - name: Type Check
+        run: npx tsc --noEmit
+
+      # Next.js 프로덕션 빌드를 수행한다.
+      # 실제 배포 시점에 가까운 상태로 컴파일/번들링이 가능한지 검증하는 단계다.
+      - name: Build
+        run: npm run build
+
+  backend:
+    # GitHub Actions UI에 표시될 백엔드 job 이름
+    name: Backend Lint & Test
+
+    # 백엔드 검증도 동일하게 Ubuntu 러너에서 수행한다.
+    runs-on: ubuntu-latest
+
+    # 백엔드 관련 run 명령은 기본적으로 backend 디렉터리에서 실행한다.
+    defaults:
+      run:
+        working-directory: backend
+
+    # 백엔드 테스트에 필요한 외부 서비스 정의:
+    # 여기서는 PostgreSQL 컨테이너를 테스트용 서비스로 함께 띄운다.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        # 테스트 시작 전에 DB가 준비되었는지 health check로 확인한다.
+        # DB가 뜨기 전에 테스트가 먼저 실행되어 실패하는 상황을 줄여준다.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # 백엔드 CI 단계들
+    steps:
+      # 저장소 코드를 러너로 가져온다.
+      - uses: actions/checkout@v4
+
+      # Python 3.11 환경을 설정한다.
+      # cache: pip 옵션과 requirements.txt 경로를 통해 pip 다운로드 캐시를 재사용한다.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      # 애플리케이션 의존성과 CI 도구를 설치한다.
+      # requirements.txt는 런타임 패키지 설치용이고,
+      # ruff / pytest / pytest-asyncio / httpx는 린트 및 테스트 실행에 필요하다.
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-asyncio httpx
+
+      # Ruff로 Python 코드 스타일 및 정적 규칙 검사를 수행한다.
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # pytest 테스트를 verbose 모드로 실행한다.
+      # DATABASE_URL은 위에서 띄운 Postgres 서비스에 연결하도록 설정한다.
+      # SQLAlchemy asyncpg 드라이버를 사용하는 URL 형식에 맞춰 지정한다.
+      - name: Test
+        run: pytest -v
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
