@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 
@@ -23,5 +23,13 @@ def health():
 @router.get("/")
 def root():
     return {"message": "Hello World"}
+
+@app.get("/whoami")
+def whoami(request: Request):
+    return {
+        "client_host": request.client.host,
+        "x_real_ip": request.headers.get("x-real-ip"),
+        "x_forwarded_for": request.headers.get("x-forwarded-for"),
+    }
 
 app.include_router(router)
